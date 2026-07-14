@@ -1,0 +1,8 @@
+*.mp3
+*.flac
+*.ogg
+*.wav
+
+/SPLIT/
+/SINGLES/
+/PLAYLISTS/
