@@ -128,17 +128,38 @@ function TitleCase-Simple {
     param([Parameter(Mandatory)] [string]$Text)
 
     $words = $Text.ToLowerInvariant() -split '\s+'
+    $minorWords = @('a', 'an', 'and', 'as', 'at', 'but', 'by', 'for', 'from', 'in', 'into', 'nor', 'of', 'on', 'or', 'the', 'to', 'with')
+    $index = 0
     $cased = foreach ($word in $words) {
         if (-not $word) { continue }
-        if ($word.Length -eq 1) {
+        if ($index -gt 0 -and $minorWords -contains $word) {
+            $word
+        }
+        elseif ($word.Length -eq 1) {
             $word.ToUpperInvariant()
         }
         else {
             $word.Substring(0, 1).ToUpperInvariant() + $word.Substring(1)
         }
+        $index++
     }
 
     return ($cased -join ' ')
+}
+
+function Normalize-ArtistCredit {
+    param([Parameter(Mandatory)] [string]$Text)
+
+    $value = Remove-Diacritics $Text
+    $value = $value -replace '\s*[\(\[\{｜|].*$', ''
+    $value = $value -replace '[^A-Za-z0-9 .,&''-]', ' '
+    $value = $value -replace '\s+', ' '
+    $value = $value.Trim()
+    if (-not $value) {
+        return $null
+    }
+
+    return $value
 }
 
 function Normalize-NamePart {
@@ -146,7 +167,7 @@ function Normalize-NamePart {
 
     $value = Convert-ToAsciiTransliteration $Text
     $value = Remove-Diacritics $value
-    $value = $value -replace '\b(official|audio|video|lyrics|lyric|mix|playlist|version|remix|topic|full|hd|4k|extended|edit|visualizer)\b', ' '
+    $value = $value -replace '\b(official|audio|video|lyrics|lyric|playlist|version|topic|full|hd|4k|extended|edit|visualizer)\b', ' '
     $value = $value -replace '\[[^\]]*\]', ' '
     $value = $value -replace '\([^\)]*\)', ' '
     $value = $value -replace '\{[^\}]*\}', ' '
@@ -221,7 +242,7 @@ function Get-LocalPartsFromFileName {
         $rawLeft = $Matches['left'].Trim()
         $rawRight = $Matches['right'].Trim()
         $left = Normalize-NamePart $rawLeft
-        $right = Normalize-NamePart $rawRight
+        $right = Normalize-NamePart ($rawRight -replace '\s*[\(\[\{｜|].*$', '')
 
         if ($left -and $right) {
             if ($isTopic) {
@@ -231,23 +252,25 @@ function Get-LocalPartsFromFileName {
                 }
             }
 
-            if (Has-ArtistSignal $rawLeft) {
+            if ($left -eq $authorPart -or $rawLeft -like "*$authorPart*") {
                 return [pscustomobject]@{
                     Author = $left
                     Title  = $right
                 }
             }
 
-            if ($left -eq $authorPart -or $rawLeft -like "*$authorPart*") {
+            if (Has-ArtistSignal $rawLeft) {
+                $artistCredit = Normalize-ArtistCredit $rawLeft
+                $author = if ($artistCredit) { '{0} ({1})' -f $authorPart, $artistCredit } else { $authorPart }
                 return [pscustomobject]@{
-                    Author = $authorPart
+                    Author = $author
                     Title  = $right
                 }
             }
 
             return [pscustomobject]@{
                 Author = $authorPart
-                Title  = $left
+                Title  = $cleanTitle
             }
         }
     }
@@ -344,16 +367,6 @@ function Get-CanonicalParts {
 
     $local = Get-LocalPartsFromFileName -FileName $FallbackName
 
-    $result = $null
-    if ($Query) {
-        try {
-            $result = Search-YouTubeResult -Query $Query
-        }
-        catch {
-            $result = $null
-        }
-    }
-
     $author = $null
     $title = $null
 
@@ -365,16 +378,28 @@ function Get-CanonicalParts {
         $title = $local.Title
     }
 
-    if ($result) {
-        $youtubeAuthor = Normalize-NamePart (($result.Channel -replace '\s*-\s*Topic$', '').Trim())
-        $youtubeTitle = Normalize-NamePart ($result.Title)
-
-        if (-not $author -and $youtubeAuthor) {
-            $author = $youtubeAuthor
+    if (-not $author -or -not $title) {
+        $result = $null
+        if ($Query) {
+            try {
+                $result = Search-YouTubeResult -Query $Query
+            }
+            catch {
+                $result = $null
+            }
         }
 
-        if (-not $title -and $youtubeTitle) {
-            $title = $youtubeTitle
+        if ($result) {
+            $youtubeAuthor = Normalize-NamePart (($result.Channel -replace '\s*-\s*Topic$', '').Trim())
+            $youtubeTitle = Normalize-NamePart ($result.Title)
+
+            if (-not $author -and $youtubeAuthor) {
+                $author = $youtubeAuthor
+            }
+
+            if (-not $title -and $youtubeTitle) {
+                $title = $youtubeTitle
+            }
         }
     }
 
@@ -400,7 +425,7 @@ foreach ($file in $files) {
 
     try {
         $query = Get-QueryFromFileName -FileName $file.Name
-        $parts = Get-CanonicalParts -Query $query -FallbackName $file.BaseName
+        $parts = Get-CanonicalParts -Query $query -FallbackName $file.Name
 
         $newName = '{0} - {1}.mp3' -f $parts.Author, $parts.Title
         $newName = $newName -replace '\s+', ' '
